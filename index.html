@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Couples Habit Tracker (Fully Functional)</title>
+  <title>Couples Habit Tracker (Fixed Streak Feature)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link
     rel="stylesheet"
@@ -243,30 +243,146 @@
     src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
   ></script>
   <script>
-    // Initialize Variables
+    // ================== Initialization and Configuration ==================
+
+    // Constants for Local Storage Keys
+    const FIRESTORE_CONFIG_STORAGE_KEY = 'couples-habit-tracker-firestore-config';
+    const STORAGE_KEY = 'couples-habit-tracker-fun';
+    const SELECTED_PARTNERS_KEY = 'couples-habit-tracker-selected-partners';
+
+    // Application State
+    let dataStore = { partners: [] };
+    let selectedPartners = [];
+    let weekOffset = 0; // For navigating weeks in Home Page
+    let analyticsView = 'weekly'; // 'weekly', 'monthly', 'yearly'
     let firestoreSettings = null;
     let firestore = null;
     let firestoreState = 'idle';
-    const FIRESTORE_CONFIG_STORAGE_KEY = 'couples-habit-tracker-firestore-config';
-    const STORAGE_KEY = 'couples-habit-tracker-fun';
-    const SELECTED_PARTNERS_KEY = 'couples-habit-tracker-selected-partners'; // New key for selected partners
-    let dataStore = { partners: [] };
-    let weekOffset = 0;
-    let analyticsView = 'weekly';
-    let selectedPartners = []; // Array to hold selected partner indices
 
-    // Firestore State Management
+    // ================== Utility Functions ==================
+
+    /**
+     * Formats a Date object to 'YYYY-MM-DD' string.
+     * @param {Date} date 
+     * @returns {string}
+     */
+    function formatDate(date) {
+      const year = date.getFullYear();
+      const month = (`0${date.getMonth() + 1}`).slice(-2);
+      const day = (`0${date.getDate()}`).slice(-2);
+      return `${year}-${month}-${day}`;
+    }
+
+    /**
+     * Returns an array of dates for the Monday of the current week plus the offset.
+     * @param {number} offset - Number of weeks to offset from the current week.
+     * @returns {Array} - Array of objects with dateStr and label.
+     */
+    function getMondayWeekDates(offset = 0) {
+      const now = new Date();
+      const dayOfWeek = (now.getDay() + 6) % 7; // Monday = 0
+      now.setDate(now.getDate() - dayOfWeek + offset * 7);
+      const arr = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(now);
+        d.setDate(now.getDate() + i);
+        const dateStr = formatDate(d);
+        const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        arr.push({ dateStr, label });
+      }
+      return arr;
+    }
+
+    /**
+     * Initializes Firestore with the provided configuration.
+     * @param {object} config 
+     */
+    function initFirestore(config) {
+      setFirestoreState('connecting');
+      try {
+        if (!firebase.apps.length) {
+          firebase.initializeApp(config);
+        }
+        firestore = firebase.firestore();
+        attachFirestoreListener();
+      } catch (err) {
+        firestore = null;
+        console.error('Error initializing Firestore:', err);
+        setFirestoreState('error');
+        alert(`Firestore Initialization Error: ${err.message}`);
+      }
+    }
+
+    /**
+     * Attaches a real-time listener to Firestore to sync data.
+     */
+    function attachFirestoreListener() {
+      if (!firestore) {
+        setFirestoreState('idle');
+        return;
+      }
+      const docRef = firestore.collection('habitTrackers').doc('default');
+      docRef.onSnapshot(
+        (doc) => {
+          if (doc.exists) {
+            dataStore = doc.data() || { partners: [] };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(dataStore));
+            setFirestoreState('connected');
+            loadSelectedPartners();
+            initPartnersDropdown();
+            router();
+          } else {
+            setFirestoreState('connected');
+          }
+        },
+        (err) => {
+          console.error('Firestore listener error:', err);
+          setFirestoreState('error');
+          alert(`Firestore Listener Error: ${err.message}`);
+        }
+      );
+    }
+
+    /**
+     * Saves data to both localStorage and Firestore.
+     */
+    function saveData() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(dataStore));
+      if (firestore) {
+        setFirestoreState('connecting');
+        firestore.collection('habitTrackers').doc('default').set(dataStore)
+          .then(() => setFirestoreState('connected'))
+          .catch((err) => {
+            console.error('Error saving to Firestore:', err);
+            setFirestoreState('error');
+            alert(`Firestore Save Error: ${err.message}`);
+          });
+      }
+    }
+
+    /**
+     * Sets the current Firestore synchronization state.
+     * @param {string} state 
+     */
     function setFirestoreState(state) {
       firestoreState = state;
       updateSyncIndicator();
     }
+
+    /**
+     * Updates the synchronization indicator in the UI based on the current state.
+     */
     function updateSyncIndicator() {
-      const ind = document.getElementById('syncIndicator');
-      ind.className = `sync-indicator ${firestoreState}`;
-      ind.textContent = firestoreState.charAt(0).toUpperCase() + firestoreState.slice(1);
+      const indicator = document.getElementById('syncIndicator');
+      indicator.className = `sync-indicator ${firestoreState}`;
+      indicator.textContent = firestoreState.charAt(0).toUpperCase() + firestoreState.slice(1);
     }
 
-    // Load selected partners from localStorage
+    // ================== Local Storage Handling ==================
+
+    /**
+     * Loads the selected partners from localStorage.
+     */
     function loadSelectedPartners() {
       const savedSelection = localStorage.getItem(SELECTED_PARTNERS_KEY);
       if (savedSelection) {
@@ -276,17 +392,490 @@
           selectedPartners = [];
         }
       } else {
-        // Default to all partners selected if no selection is saved
         selectedPartners = dataStore.partners.map((_, index) => index);
       }
     }
 
-    // Save selected partners to localStorage
+    /**
+     * Saves the selected partners to localStorage.
+     */
     function saveSelectedPartners() {
       localStorage.setItem(SELECTED_PARTNERS_KEY, JSON.stringify(selectedPartners));
     }
 
-    // Initialize the multi-select dropdown
+    // ================== Event Handlers ==================
+
+    /**
+     * Attaches event listeners to dynamically generated elements on the Home page.
+     */
+    function attachHomeEvents() {
+      document.getElementById('btnPrev')?.addEventListener('click', () => {
+        weekOffset--;
+        renderHomePage();
+      });
+      document.getElementById('btnNext')?.addEventListener('click', () => {
+        weekOffset++;
+        renderHomePage();
+      });
+      document.getElementById('btnThisWeek')?.addEventListener('click', () => {
+        weekOffset = 0;
+        renderHomePage();
+      });
+      document.querySelectorAll('.heart-btn').forEach((el) => {
+        el.addEventListener('click', () => {
+          const pIndex = +el.dataset.partnerIndex;
+          const hIndex = +el.dataset.habitIndex;
+          const dateStr = el.dataset.datestr;
+          const habit = dataStore.partners[pIndex].habits[hIndex];
+          if (!habit.logs[dateStr]) {
+            habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
+          }
+          const wasChecked = habit.logs[dateStr].checked;
+          habit.logs[dateStr].checked = !wasChecked;
+          if (wasChecked) {
+            habit.logs[dateStr].notes = '';
+            habit.logs[dateStr].feeling = 'None';
+          }
+          saveData();
+          updateHeartButton(pIndex, hIndex, dateStr);
+        });
+      });
+      document.querySelectorAll('.details-btn').forEach((b) => {
+        b.addEventListener('click', () => {
+          const p = +b.dataset.partnerIndex;
+          const h = +b.dataset.habitIndex;
+          const d = b.dataset.datestr;
+          openDetailsModal(p, h, d);
+        });
+      });
+    }
+
+    /**
+     * Attaches event listeners to dynamically generated elements on the Settings page.
+     */
+    function attachSettingsEvents() {
+      // Firestore Configuration Form Submission
+      document.getElementById('firestoreConfigForm')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const apiKey = document.getElementById('firebaseApiKey').value.trim();
+        const authDomain = document.getElementById('firebaseAuthDomain').value.trim();
+        const projectId = document.getElementById('firebaseProjectId').value.trim();
+
+        if (!apiKey || !authDomain || !projectId) {
+          alert('Please fill in all Firestore configuration fields.');
+          return;
+        }
+
+        const config = { apiKey, authDomain, projectId };
+        localStorage.setItem(FIRESTORE_CONFIG_STORAGE_KEY, JSON.stringify(config));
+        firestoreSettings = config;
+        initFirestore(config);
+        alert('Firestore configuration saved and connected.');
+
+        // Hide the modal properly to remove the backdrop
+        const modalElement = document.getElementById('firestoreConfigModal');
+        const modal = bootstrap.Modal.getInstance(modalElement);
+        if (modal) {
+          modal.hide();
+        }
+      });
+
+      // Pre-populate Firestore Configuration Modal if settings exist
+      const firestoreConfigModal = document.getElementById('firestoreConfigModal');
+      firestoreConfigModal.addEventListener('show.bs.modal', () => {
+        if (firestoreSettings) {
+          document.getElementById('firebaseApiKey').value = firestoreSettings.apiKey || '';
+          document.getElementById('firebaseAuthDomain').value = firestoreSettings.authDomain || '';
+          document.getElementById('firebaseProjectId').value = firestoreSettings.projectId || '';
+        } else {
+          document.getElementById('firebaseApiKey').value = '';
+          document.getElementById('firebaseAuthDomain').value = '';
+          document.getElementById('firebaseProjectId').value = '';
+        }
+      });
+
+      // Add Partner Form Submission
+      document.getElementById('addPartnerForm')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const nameInput = document.getElementById('partnerName');
+        const name = nameInput.value.trim();
+        if (name === '') {
+          alert('Partner name cannot be empty.');
+          return;
+        }
+        // Check for duplicate partner name
+        const duplicate = dataStore.partners.some(p => p.name.toLowerCase() === name.toLowerCase());
+        if (duplicate) {
+          alert('A partner with this name already exists.');
+          return;
+        }
+        // Add new partner
+        dataStore.partners.push({ name, habits: [] });
+        saveData();
+        // Reset and close modal
+        nameInput.value = '';
+        // Update selected partners (select the new partner by default)
+        selectedPartners.push(dataStore.partners.length - 1);
+        saveSelectedPartners();
+        // Re-initialize dropdown
+        initPartnersDropdown();
+        // Hide the modal properly
+        const addPartnerModal = bootstrap.Modal.getInstance(document.getElementById('addPartnerModal'));
+        if (addPartnerModal) {
+          addPartnerModal.hide();
+        }
+      });
+
+      // Edit Partner Form Submission
+      document.getElementById('editPartnerForm')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const pIndex = parseInt(document.getElementById('editPartnerIndex').value);
+        const name = document.getElementById('editPartnerName').value.trim();
+        if (name === '') {
+          alert('Partner name cannot be empty.');
+          return;
+        }
+        // Check for duplicate partner name excluding current
+        const duplicate = dataStore.partners.some((p, index) => p.name.toLowerCase() === name.toLowerCase() && index !== pIndex);
+        if (duplicate) {
+          alert('Another partner with this name already exists.');
+          return;
+        }
+        // Update partner name
+        dataStore.partners[pIndex].name = name;
+        saveData();
+        // Re-initialize dropdown
+        initPartnersDropdown();
+        // Hide the modal properly
+        const editPartnerModal = bootstrap.Modal.getInstance(document.getElementById('editPartnerModal'));
+        if (editPartnerModal) {
+          editPartnerModal.hide();
+        }
+      });
+
+      // Add Habit Form Submission
+      document.getElementById('addHabitForm')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const pIndex = parseInt(document.getElementById('addHabitPartnerIndex').value);
+        const title = document.getElementById('habitTitle').value.trim();
+        const frequency = document.getElementById('habitFrequency').value;
+        const goal = parseInt(document.getElementById('habitGoal').value);
+        if (title === '' || isNaN(goal) || goal < 1) {
+          alert('Please provide a valid habit title and goal.');
+          return;
+        }
+        // Check for duplicate habit title under the same partner
+        const duplicate = dataStore.partners[pIndex].habits.some(h => h.title.toLowerCase() === title.toLowerCase());
+        if (duplicate) {
+          alert('A habit with this title already exists for this partner.');
+          return;
+        }
+        // Add new habit
+        dataStore.partners[pIndex].habits.push({ title, frequency, goal, logs: {} });
+        saveData();
+        // Reset and close modal
+        document.getElementById('habitTitle').value = '';
+        document.getElementById('habitFrequency').value = 'weekly';
+        document.getElementById('habitGoal').value = '';
+        // Hide the modal properly
+        const addHabitModal = bootstrap.Modal.getInstance(document.getElementById('addHabitModal'));
+        if (addHabitModal) {
+          addHabitModal.hide();
+        }
+      });
+
+      // Edit Habit Form Submission
+      document.getElementById('editHabitForm')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const pIndex = parseInt(document.getElementById('editHabitPartnerIndex').value);
+        const hIndex = parseInt(document.getElementById('editHabitIndex').value);
+        const title = document.getElementById('editHabitTitle').value.trim();
+        const frequency = document.getElementById('editHabitFrequency').value;
+        const goal = parseInt(document.getElementById('editHabitGoal').value);
+        if (title === '' || isNaN(goal) || goal < 1) {
+          alert('Please provide a valid habit title and goal.');
+          return;
+        }
+        // Check for duplicate habit title under the same partner excluding current
+        const duplicate = dataStore.partners[pIndex].habits.some((h, index) => h.title.toLowerCase() === title.toLowerCase() && index !== hIndex);
+        if (duplicate) {
+          alert('Another habit with this title already exists for this partner.');
+          return;
+        }
+        // Update habit
+        dataStore.partners[pIndex].habits[hIndex].title = title;
+        dataStore.partners[pIndex].habits[hIndex].frequency = frequency;
+        dataStore.partners[pIndex].habits[hIndex].goal = goal;
+        saveData();
+        // Re-initialize dropdown
+        initPartnersDropdown();
+        // Hide the modal properly
+        const editHabitModal = bootstrap.Modal.getInstance(document.getElementById('editHabitModal'));
+        if (editHabitModal) {
+          editHabitModal.hide();
+        }
+      });
+
+      // Remove Partner
+      document.querySelectorAll('.remove-partner-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
+          const confirmDelete = confirm(`Are you sure you want to remove partner "${dataStore.partners[pIndex].name}"? This will also remove all their habits.`);
+          if (confirmDelete) {
+            dataStore.partners.splice(pIndex, 1);
+            saveData();
+            // Remove from selectedPartners if present
+            selectedPartners = selectedPartners.filter(index => index !== pIndex);
+            // Update indices in selectedPartners that are greater than pIndex
+            selectedPartners = selectedPartners.map(index => index > pIndex ? index - 1 : index);
+            saveSelectedPartners();
+            // Re-initialize dropdown
+            initPartnersDropdown();
+            // Re-render settings page
+            renderSettingsPage();
+            // Re-render home and analytics pages
+            renderHomePage();
+            renderAnalyticsPage();
+          }
+        });
+      });
+
+      // Edit Partner Button Click
+      document.querySelectorAll('.edit-partner-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
+          document.getElementById('editPartnerIndex').value = pIndex;
+          document.getElementById('editPartnerName').value = dataStore.partners[pIndex].name;
+        });
+      });
+
+      // Remove Habit
+      document.querySelectorAll('.remove-habit-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
+          const hIndex = parseInt(e.target.getAttribute('data-habit-index'));
+          const confirmDelete = confirm(`Are you sure you want to remove habit "${dataStore.partners[pIndex].habits[hIndex].title}"?`);
+          if (confirmDelete) {
+            dataStore.partners[pIndex].habits.splice(hIndex, 1);
+            saveData();
+            // Re-render settings page
+            renderSettingsPage();
+            // Re-initialize dropdown
+            initPartnersDropdown();
+            // Re-render home and analytics pages
+            renderHomePage();
+            renderAnalyticsPage();
+          }
+        });
+      });
+
+      // Edit Habit Button Click
+      document.querySelectorAll('.edit-habit-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
+          const hIndex = parseInt(e.target.getAttribute('data-habit-index'));
+          document.getElementById('editHabitPartnerIndex').value = pIndex;
+          document.getElementById('editHabitIndex').value = hIndex;
+          document.getElementById('editHabitTitle').value = dataStore.partners[pIndex].habits[hIndex].title;
+          document.getElementById('editHabitFrequency').value = dataStore.partners[pIndex].habits[hIndex].frequency;
+          document.getElementById('editHabitGoal').value = dataStore.partners[pIndex].habits[hIndex].goal;
+        });
+      });
+
+      // Add Habit Button Click - Set the partner index in the modal
+      document.querySelectorAll('.add-habit-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
+          document.getElementById('addHabitPartnerIndex').value = pIndex;
+          // Reset the form fields
+          document.getElementById('habitTitle').value = '';
+          document.getElementById('habitFrequency').value = 'weekly';
+          document.getElementById('habitGoal').value = '';
+        });
+      });
+
+      // Delete All Data Button Click
+      document.getElementById('deleteAllDataBtn')?.addEventListener('click', () => {
+        const deleteAllDataModal = new bootstrap.Modal(document.getElementById('deleteAllDataModal'));
+        deleteAllDataModal.show();
+      });
+
+      // Confirm Delete All Data
+      document.getElementById('confirmDeleteAllDataBtn')?.addEventListener('click', () => {
+        // Clear localStorage
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(FIRESTORE_CONFIG_STORAGE_KEY);
+        localStorage.removeItem(SELECTED_PARTNERS_KEY);
+        dataStore = { partners: [] };
+        selectedPartners = [];
+        // Delete Firestore data
+        if (firestore) {
+          firestore.collection('habitTrackers').doc('default').delete()
+            .then(() => {
+              console.log('All Firestore data deleted.');
+            })
+            .catch(err => {
+              console.error('Error deleting Firestore data:', err);
+              alert(`Error deleting Firestore data: ${err.message}`);
+            });
+        }
+        // Re-initialize
+        initPartnersDropdown();
+        // Re-render settings, home, and analytics pages
+        renderSettingsPage();
+        renderHomePage();
+        renderAnalyticsPage();
+        // Hide the modal
+        const deleteAllDataModal = bootstrap.Modal.getInstance(document.getElementById('deleteAllDataModal'));
+        if (deleteAllDataModal) {
+          deleteAllDataModal.hide();
+        }
+      });
+    }
+
+    // ================== Modal Functions ==================
+
+    /**
+     * Opens the Details Modal for a specific habit entry.
+     * @param {number} pIndex - Partner index.
+     * @param {number} hIndex - Habit index.
+     * @param {string} dateStr - Date string in 'YYYY-MM-DD' format.
+     */
+    function openDetailsModal(pIndex, hIndex, dateStr) {
+      const habit = dataStore.partners[pIndex].habits[hIndex];
+      if (!habit.logs[dateStr]) {
+        habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
+      }
+      const logs = habit.logs[dateStr];
+      const modalContent = document.getElementById('detailsModalContent');
+      const feelings = ['Great', 'Good', 'Meh', 'Bad', 'None'];
+      let feelingOptions = '';
+      feelings.forEach(f => {
+        const sel = logs.feeling === f ? 'selected' : '';
+        feelingOptions += `<option value="${f}" ${sel}>${f}</option>`;
+      });
+      modalContent.innerHTML = `
+        <div class="modal-header">
+          <h5 class="modal-title">Details for ${habit.title} on ${dateStr}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-feeling feeling-${logs.feeling}" id="detailsModalBody">
+          <div class="mb-3">
+            <label class="form-label"><strong>Notes:</strong></label>
+            <textarea class="form-control" rows="3" id="modalNotes">${logs.notes || ''}</textarea>
+          </div>
+          <div>
+            <label class="form-label"><strong>Feeling:</strong></label>
+            <select class="form-select" id="modalFeeling">${feelingOptions}</select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="btn btn-primary"
+            id="saveDetailsBtn"
+            data-bs-dismiss="modal"
+          >
+            Save
+          </button>
+        </div>
+      `;
+      const feelSel = document.getElementById('modalFeeling');
+      feelSel.addEventListener('change', (e) => {
+        const val = e.target.value || 'None';
+        const body = document.getElementById('detailsModalBody');
+        body.className = `modal-feeling feeling-${val}`;
+      });
+      document.getElementById('saveDetailsBtn').addEventListener('click', () => {
+        const notes = document.getElementById('modalNotes').value;
+        const feeling = document.getElementById('modalFeeling').value;
+        // Update habit logs
+        habit.logs[dateStr].checked = true;
+        habit.logs[dateStr].notes = notes;
+        habit.logs[dateStr].feeling = feeling;
+        saveData();
+        // Update the heart button directly
+        updateHeartButton(pIndex, hIndex, dateStr);
+      });
+    }
+
+    // ================== Heart Button Update ==================
+
+    /**
+     * Updates the heart button's appearance based on the habit's completion status.
+     * @param {number} pIndex - Partner index.
+     * @param {number} hIndex - Habit index.
+     * @param {string} dateStr - Date string in 'YYYY-MM-DD' format.
+     */
+    function updateHeartButton(pIndex, hIndex, dateStr) {
+      const selector = `.heart-btn[data-partner-index="${pIndex}"][data-habit-index="${hIndex}"][data-datestr="${dateStr}"]`;
+      const heartBtn = document.querySelector(selector);
+      if (heartBtn) {
+        const isChecked = dataStore.partners[pIndex].habits[hIndex].logs[dateStr].checked;
+        if (isChecked) {
+          heartBtn.classList.remove('empty');
+          heartBtn.classList.add('filled');
+          heartBtn.textContent = '♥';
+        } else {
+          heartBtn.classList.remove('filled');
+          heartBtn.classList.add('empty');
+          heartBtn.textContent = '♡';
+        }
+      }
+    }
+
+    // ================== Routing ==================
+
+    /**
+     * Defines the routes and their corresponding rendering functions.
+     */
+    const routes = {
+      '/home': renderHomePage,
+      '/analytics': renderAnalyticsPage,
+      '/settings': renderSettingsPage
+    };
+
+    /**
+     * Handles routing based on the current hash.
+     */
+    function router() {
+      const hash = window.location.hash || '#/home';
+      const path = hash.replace('#', '');
+      (routes[path] || routes['/home'])();
+    }
+
+    window.addEventListener('hashchange', router);
+    window.addEventListener('load', () => {
+      // Load data from localStorage
+      const savedLocal = localStorage.getItem(STORAGE_KEY);
+      if (savedLocal) {
+        try {
+          dataStore = JSON.parse(savedLocal);
+        } catch {}
+      }
+      // Load Firestore configuration
+      const savedFirestoreConfig = localStorage.getItem(FIRESTORE_CONFIG_STORAGE_KEY);
+      if (savedFirestoreConfig) {
+        try {
+          firestoreSettings = JSON.parse(savedFirestoreConfig);
+        } catch {}
+      }
+      // Initialize Firestore if configured
+      if (firestoreSettings) {
+        initFirestore(firestoreSettings);
+      } else {
+        setFirestoreState('idle');
+        loadSelectedPartners();
+        initPartnersDropdown();
+        router();
+      }
+    });
+
+    // ================== Rendering Functions ==================
+
+    /**
+     * Initializes the partners dropdown with checkboxes.
+     */
     function initPartnersDropdown() {
       const dropdown = document.getElementById('partnersDropdown');
       dropdown.innerHTML = ''; // Clear existing options
@@ -313,193 +902,27 @@
             selectedPartners = selectedPartners.filter(index => index !== pIndex);
           }
           saveSelectedPartners();
-          renderHomePage();
-          renderAnalyticsPage();
+          // Re-render pages without changing the current route
+          const currentRoute = window.location.hash.replace('#', '');
+          if (currentRoute === '/home') {
+            renderHomePage();
+          } else if (currentRoute === '/analytics') {
+            renderAnalyticsPage();
+          }
         });
       });
     }
 
-    // Load Data from localStorage and Firestore
-    const savedLocal = localStorage.getItem(STORAGE_KEY);
-    if (savedLocal) {
-      try {
-        dataStore = JSON.parse(savedLocal);
-      } catch {}
-    }
-    const savedFirestoreConfig = localStorage.getItem(FIRESTORE_CONFIG_STORAGE_KEY);
-    if (savedFirestoreConfig) {
-      try {
-        firestoreSettings = JSON.parse(savedFirestoreConfig);
-      } catch {}
-    }
+    /**
+     * Renders the Home page with habit tracking.
+     */
+    function renderHomePage() {
+      const app = document.getElementById('app');
+      const days = getMondayWeekDates(weekOffset);
+      const todayStr = formatDate(new Date());
 
-    // Initialize Firestore
-    function initFirestore(config) {
-      setFirestoreState('connecting');
-      try {
-        // Prevent initializing multiple Firebase apps
-        if (!firebase.apps.length) {
-          firebase.initializeApp(config);
-        }
-        firestore = firebase.firestore();
-        attachFirestoreListener();
-      } catch (err) {
-        firestore = null;
-        console.error('Error init Firestore:', err);
-        setFirestoreState('error');
-        alert(`Error: ${err.message}`);
-      }
-    }
-
-    // Attach Firestore Listener
-    function attachFirestoreListener() {
-      if (!firestore) {
-        setFirestoreState('idle');
-        return;
-      }
-      const docRef = firestore.collection('habitTrackers').doc('default');
-      docRef.onSnapshot(
-        (doc) => {
-          if (doc.exists) {
-            dataStore = doc.data() || { partners: [] };
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(dataStore));
-            setFirestoreState('connected');
-            loadSelectedPartners(); // Reload selected partners after data update
-            initPartnersDropdown(); // Re-initialize dropdown with updated partners
-            router();
-          } else {
-            setFirestoreState('connected');
-          }
-        },
-        (err) => {
-          console.error('Firestore listener error:', err);
-          setFirestoreState('error');
-          alert(`Firestore error: ${err.message}`);
-        }
-      );
-    }
-
-    // Save Data to localStorage and Firestore
-    function saveData() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(dataStore));
-      if (firestore) {
-        setFirestoreState('connecting');
-        firestore
-          .collection('habitTrackers')
-          .doc('default')
-          .set(dataStore)
-          .then(() => {
-            setFirestoreState('connected');
-          })
-          .catch((err) => {
-            console.error('Error saving Firestore:', err);
-            setFirestoreState('error');
-            alert(`Error saving Firestore: ${err.message}`);
-          });
-      }
-    }
-
-    // Routing Setup
-    const routes = {
-      '/home': renderHomePage,
-      '/analytics': renderAnalyticsPage,
-      '/settings': renderSettingsPage
-    };
-    function router() {
-      const hash = window.location.hash || '#/home';
-      const path = hash.replace('#','');
-      (routes[path] || routes['/home'])();
-    }
-    window.addEventListener('hashchange', router);
-    window.addEventListener('load', () => {
-      if (firestoreSettings) {
-        initFirestore(firestoreSettings);
-      } else {
-        setFirestoreState('idle');
-        loadSelectedPartners();
-        initPartnersDropdown();
-        router();
-      }
-    });
-
-    // Utility Function to Get Monday's Week Dates
-    function getMondayWeekDates(offset=0){
-      const now=new Date();
-      const dayOfWeek=(now.getDay()+6)%7; // Make Monday = 0
-      now.setDate(now.getDate()-dayOfWeek + offset*7);
-      const arr=[];
-      for(let i=0;i<7;i++){
-        const d=new Date(now);
-        d.setDate(now.getDate()+i);
-        const dateStr=d.toISOString().split('T')[0];
-        const label=d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-        arr.push({dateStr,label});
-      }
-      return arr;
-    }
-
-    // Compute Weekly Streak
-    function computeWeeklyStreak(habit){
-      if(habit.frequency !== 'weekly') return 0; // Only compute streak for weekly habits
-      const now = new Date();
-      let streak = 0;
-      let weekOffset = 0; // Current week
-      while(true){
-        const weekDates = getMondayWeekDates(weekOffset);
-        const count = weekDates.reduce((acc, day) => {
-          if(habit.logs[day.dateStr] && habit.logs[day.dateStr].checked){
-            return acc +1;
-          }
-          return acc;
-        }, 0);
-        const weeklyGoal = habit.goal >0 ? habit.goal : 7;
-        if(count >= weeklyGoal){
-          streak++;
-          weekOffset--;
-        } else if (count<weeklyGoal && weekOffset==0){
-          weekOffset--;
-          }
-        else {
-          break;
-        }
-      }
-      return streak;
-    }
-
-    // Compute Goal Progress
-    function computeGoalProgress(habit, days){
-      let c=0;
-      if(habit.frequency === 'weekly'){
-        days.forEach(({dateStr})=>{
-          if(habit.logs[dateStr]?.checked)c++;
-        });
-        const weeklyGoal = habit.goal >0 ? habit.goal :7;
-        const percent=Math.round((c/weeklyGoal)*100);
-        return {count: c, percent: percent};
-      }
-      else if(habit.frequency === 'yearly'){
-        const now = new Date();
-        const currentYear = now.getFullYear();
-        Object.keys(habit.logs).forEach(d =>{
-          const date = new Date(d);
-          if(date.getFullYear() === currentYear && habit.logs[d].checked){
-            c++;
-          }
-        });
-        const yearlyGoal = habit.goal >0 ? habit.goal :1;
-        const percent=Math.round((c/yearlyGoal)*100);
-        return {count: c, percent: percent};
-      }
-      return {count:0, percent:0};
-    }
-
-    // Render Home Page
-    function renderHomePage(){
-      const app=document.getElementById('app');
-      const days=getMondayWeekDates(weekOffset);
-      const todayStr=new Date().toISOString().split('T')[0];
-      if(!dataStore.partners.length){
-        app.innerHTML=`
+      if (!dataStore.partners.length) {
+        app.innerHTML = `
           <div class="text-center mt-5">
             <h3>Welcome!</h3>
             <p class="text-muted">No partners yet. <a href="#/settings">Add some</a>.</p>
@@ -507,8 +930,9 @@
         `;
         return;
       }
-      if(selectedPartners.length === 0){
-        app.innerHTML=`
+
+      if (selectedPartners.length === 0) {
+        app.innerHTML = `
           <div class="text-center mt-5">
             <h4>No Partners Selected</h4>
             <p class="text-muted">Please select at least one partner from the dropdown above.</p>
@@ -516,7 +940,8 @@
         `;
         return;
       }
-      let html=`
+
+      let html = `
         <!-- Controls -->
         <div class="d-flex justify-content-center align-items-center mb-3 gap-2 flex-wrap">
           <button id="btnPrev" class="btn btn-sm btn-secondary">← Prev</button>
@@ -538,40 +963,41 @@
               <tr>
                 <th style="min-width:160px;">Habit</th>
       `;
-      days.forEach(({label,dateStr})=>{
-        html+=`
+
+      days.forEach(({ label, dateStr }) => {
+        html += `
           <th style="width:120px;">
             <div>${label}</div>
             <div class="small text-muted">${dateStr}</div>
           </th>
         `;
       });
-      html+=`
+
+      html += `
                 <th>Progress</th>
               </tr>
             </thead>
             <tbody>
       `;
-      selectedPartners.forEach(pIndex=>{
+
+      selectedPartners.forEach(pIndex => {
         const partner = dataStore.partners[pIndex];
-        partner.habits.forEach((habit,hIndex)=>{
-          if(!habit.logs) habit.logs={};
-          const {count, percent} = computeGoalProgress(habit, days);
+        partner.habits.forEach((habit, hIndex) => {
+          if (!habit.logs) habit.logs = {};
+          const { count, percent } = computeGoalProgress(habit, days);
+          const streak = computeWeeklyStreak(habit);
           let progressInfo = '';
-          let streakInfo = '';
           let displayDays = '';
-          if(habit.frequency === 'weekly'){
-            const weeklyGoal = habit.goal >0 ? habit.goal :7;
-            const currStreak = computeWeeklyStreak(habit);
-            const progressColor = count >= weeklyGoal ? 'bg-success' : 'bg-warning';
-            streakInfo = currStreak >0 ? `<span class="fire-icon">🔥 Streak: ${currStreak} week(s)</span>` : '';
-            displayDays = days.map(({dateStr})=>{
-              if(!habit.logs[dateStr]){
-                habit.logs[dateStr]={checked:false,notes:'',feeling:'None'};
+
+          if (habit.frequency === 'weekly') {
+            const weeklyGoal = habit.goal > 0 ? habit.goal : 7;
+            displayDays = days.map(({ dateStr }) => {
+              if (!habit.logs[dateStr]) {
+                habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
               }
-              const logs=habit.logs[dateStr];
-              const isFilled=logs.checked?'filled':'empty';
-              const highlight=dateStr===todayStr?'today-cell':'';
+              const logs = habit.logs[dateStr];
+              const isFilled = logs.checked ? 'filled' : 'empty';
+              const highlight = dateStr === todayStr ? 'today-cell' : '';
               return `
                 <td class="${highlight}">
                   <span
@@ -580,7 +1006,7 @@
                     data-habit-index="${hIndex}"
                     data-datestr="${dateStr}"
                   >
-                    ${isFilled==='filled'?'♥':'♡'}
+                    ${isFilled === 'filled' ? '♥' : '♡'}
                   </span>
                   <br />
                   <button
@@ -598,21 +1024,21 @@
             }).join('');
             progressInfo = `
               <div class="progress">
-                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar bg-info" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
               </div>
               <small class="text-muted">${count}/${weeklyGoal} (${percent}%)</small>
+              <br>
+              <small class="text-success streak">🔥 Streak: ${streak} week(s)</small>
             `;
-          }
-          else if(habit.frequency === 'yearly'){
-            const yearlyGoal = habit.goal >0 ? habit.goal :1;
-            const progressColor = count >= yearlyGoal ? 'bg-success' : 'bg-info';
-            displayDays = days.map(({dateStr})=>{
-              if(!habit.logs[dateStr]){
-                habit.logs[dateStr]={checked:false,notes:'',feeling:'None'};
+          } else if (habit.frequency === 'yearly') {
+            const yearlyGoal = habit.goal > 0 ? habit.goal : 1;
+            displayDays = days.map(({ dateStr }) => {
+              if (!habit.logs[dateStr]) {
+                habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
               }
-              const logs=habit.logs[dateStr];
-              const isFilled=logs.checked?'filled':'empty';
-              const highlight=dateStr===todayStr?'today-cell':'';
+              const logs = habit.logs[dateStr];
+              const isFilled = logs.checked ? 'filled' : 'empty';
+              const highlight = dateStr === todayStr ? 'today-cell' : '';
               return `
                 <td class="${highlight}">
                   <span
@@ -621,7 +1047,7 @@
                     data-habit-index="${hIndex}"
                     data-datestr="${dateStr}"
                   >
-                    ${isFilled==='filled'?'♥':'♡'}
+                    ${isFilled === 'filled' ? '♥' : '♡'}
                   </span>
                   <br />
                   <button
@@ -639,19 +1065,18 @@
             }).join('');
             progressInfo = `
               <div class="progress">
-                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar bg-info" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
               </div>
               <small class="text-muted">${count}/${yearlyGoal} (${percent}%)</small>
             `;
           }
 
-          html+=`
+          html += `
             <tr>
               <td class="text-start">
                 <strong>${partner.name} - ${habit.title}</strong>
                 <br>
-                <small class="text-muted">(${habit.frequency.charAt(0).toUpperCase() + habit.frequency.slice(1)} Goal: ${habit.frequency === 'weekly' ? (habit.goal >0 ? habit.goal :7) : (habit.goal >0 ? habit.goal :1)})</small>
-                ${streakInfo}
+                <small class="text-muted">(${capitalizeFirstLetter(habit.frequency)} Goal: ${habit.frequency === 'weekly' ? (habit.goal > 0 ? habit.goal : 7) : (habit.goal > 0 ? habit.goal : 1)})</small>
               </td>
               ${displayDays}
               <td>
@@ -661,30 +1086,29 @@
           `;
         });
       });
-      html+=`</tbody></table></div>`;
+
+      html += `</tbody></table></div>`;
 
       // Cards for small screens
-      html+=`<div class="cards-container d-block d-sm-none">`;
-      selectedPartners.forEach(pIndex=>{
+      html += `<div class="cards-container d-block d-sm-none">`;
+      selectedPartners.forEach(pIndex => {
         const partner = dataStore.partners[pIndex];
-        partner.habits.forEach((habit,hIndex)=>{
-          if(!habit.logs) habit.logs={};
-          const {count, percent} = computeGoalProgress(habit, days);
+        partner.habits.forEach((habit, hIndex) => {
+          if (!habit.logs) habit.logs = {};
+          const { count, percent } = computeGoalProgress(habit, days);
+          const streak = computeWeeklyStreak(habit);
           let progressInfo = '';
-          let streakInfo = '';
           let displayDays = '';
-          if(habit.frequency === 'weekly'){
-            const weeklyGoal = habit.goal >0 ? habit.goal :7;
-            const currStreak = computeWeeklyStreak(habit);
-            const progressColor = count >= weeklyGoal ? 'bg-success' : 'bg-warning';
-            streakInfo = currStreak >0 ? `<span class="streak">🔥 Streak: ${currStreak} week(s)</span>` : '';
-            displayDays = days.map(({dateStr, label})=>{
-              if(!habit.logs[dateStr]){
-                habit.logs[dateStr]={checked:false,notes:'',feeling:'None'};
+
+          if (habit.frequency === 'weekly') {
+            const weeklyGoal = habit.goal > 0 ? habit.goal : 7;
+            displayDays = days.map(({ dateStr, label }) => {
+              if (!habit.logs[dateStr]) {
+                habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
               }
-              const logs=habit.logs[dateStr];
-              const isFilled=logs.checked?'filled':'empty';
-              const highlight=dateStr===todayStr?'today-cell':'';
+              const logs = habit.logs[dateStr];
+              const isFilled = logs.checked ? 'filled' : 'empty';
+              const highlight = dateStr === todayStr ? 'today-cell' : '';
               return `
                 <div class="day-item ${highlight}">
                   <div class="day-label">${label}</div>
@@ -694,7 +1118,7 @@
                     data-habit-index="${hIndex}"
                     data-datestr="${dateStr}"
                   >
-                    ${isFilled==='filled'?'♥':'♡'}
+                    ${isFilled === 'filled' ? '♥' : '♡'}
                   </span>
                   <button
                     class="btn btn-sm details-btn mt-1 feeling-${logs.feeling}"
@@ -711,21 +1135,21 @@
             }).join('');
             progressInfo = `
               <div class="progress mb-1">
-                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar bg-info" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
               </div>
               <small class="text-muted">Progress: ${count}/${weeklyGoal} (${percent}%)</small>
+              <br>
+              <small class="text-success streak">🔥 Streak: ${streak} week(s)</small>
             `;
-          }
-          else if(habit.frequency === 'yearly'){
-            const yearlyGoal = habit.goal >0 ? habit.goal :1;
-            const progressColor = count >= yearlyGoal ? 'bg-success' : 'bg-info';
-            displayDays = days.map(({dateStr, label})=>{
-              if(!habit.logs[dateStr]){
-                habit.logs[dateStr]={checked:false,notes:'',feeling:'None'};
+          } else if (habit.frequency === 'yearly') {
+            const yearlyGoal = habit.goal > 0 ? habit.goal : 1;
+            displayDays = days.map(({ dateStr, label }) => {
+              if (!habit.logs[dateStr]) {
+                habit.logs[dateStr] = { checked: false, notes: '', feeling: 'None' };
               }
-              const logs=habit.logs[dateStr];
-              const isFilled=logs.checked?'filled':'empty';
-              const highlight=dateStr===todayStr?'today-cell':'';
+              const logs = habit.logs[dateStr];
+              const isFilled = logs.checked ? 'filled' : 'empty';
+              const highlight = dateStr === todayStr ? 'today-cell' : '';
               return `
                 <div class="day-item ${highlight}">
                   <div class="day-label">${label}</div>
@@ -735,7 +1159,7 @@
                     data-habit-index="${hIndex}"
                     data-datestr="${dateStr}"
                   >
-                    ${isFilled==='filled'?'♥':'♡'}
+                    ${isFilled === 'filled' ? '♥' : '♡'}
                   </span>
                   <button
                     class="btn btn-sm details-btn mt-1 feeling-${logs.feeling}"
@@ -752,19 +1176,18 @@
             }).join('');
             progressInfo = `
               <div class="progress mb-1">
-                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar bg-info" role="progressbar" style="width: ${percent > 100 ? 100 : percent}%;" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
               </div>
               <small class="text-muted">Progress: ${count}/${yearlyGoal} (${percent}%)</small>
             `;
           }
 
-          html+=`
+          html += `
             <div class="habit-card">
               <div class="habit-header">
                 <div class="habit-title">${partner.name} - ${habit.title}</div>
-                ${streakInfo}
               </div>
-              <div class="mb-2 text-muted">(${habit.frequency.charAt(0).toUpperCase() + habit.frequency.slice(1)} Goal: ${habit.frequency === 'weekly' ? (habit.goal >0 ? habit.goal :7) : (habit.goal >0 ? habit.goal :1)})</div>
+              <div class="mb-2 text-muted">(${capitalizeFirstLetter(habit.frequency)} Goal: ${habit.frequency === 'weekly' ? (habit.goal > 0 ? habit.goal : 7) : (habit.goal > 0 ? habit.goal : 1)})</div>
               <div class="days-container">
                 ${displayDays}
               </div>
@@ -775,138 +1198,29 @@
           `;
         });
       });
-      html+=`</div>`;
+      html += `</div>`;
 
-      app.innerHTML=html;
+      app.innerHTML = html;
       attachHomeEvents();
     }
 
-    // Attach Events for Home Page
-    function attachHomeEvents(){
-      document.getElementById('btnPrev')?.addEventListener('click',()=>{
-        weekOffset--;
-        renderHomePage();
-      });
-      document.getElementById('btnNext')?.addEventListener('click',()=>{
-        weekOffset++;
-        renderHomePage();
-      });
-      document.getElementById('btnThisWeek')?.addEventListener('click',()=>{
-        weekOffset=0;
-        renderHomePage();
-      });
-      document.querySelectorAll('.heart-btn').forEach((el)=>{
-        el.addEventListener('click',()=>{
-          const pIndex=+el.dataset.partnerIndex;
-          const hIndex=+el.dataset.habitIndex;
-          const d=el.dataset.datestr;
-          const habit=dataStore.partners[pIndex].habits[hIndex];
-          if(!habit.logs[d]){
-            habit.logs[d]={checked:false,notes:'',feeling:'None'};
-          }
-          const wasChecked=habit.logs[d].checked;
-          habit.logs[d].checked=!wasChecked;
-          if(wasChecked){
-            habit.logs[d].notes='';
-            habit.logs[d].feeling='None';
-          }
-          saveData();
-          // Update the heart button directly
-          updateHeartButton(pIndex, hIndex, d);
-        });
-      });
-      document.querySelectorAll('.details-btn').forEach((b)=>{
-        b.addEventListener('click',()=>{
-          const p=+b.dataset.partnerIndex;
-          const h=+b.dataset.habitIndex;
-          const d=b.dataset.datestr;
-          openDetailsModal(p,h,d);
-        });
-      });
+    /**
+     * Capitalizes the first letter of a given string.
+     * @param {string} str 
+     * @returns {string}
+     */
+    function capitalizeFirstLetter(str) {
+      return str.charAt(0).toUpperCase() + str.slice(1);
     }
 
-    // Open Details Modal
-    function openDetailsModal(pIndex,hIndex,dateStr){
-      const habit=dataStore.partners[pIndex].habits[hIndex];
-      if(!habit.logs[dateStr]){
-        habit.logs[dateStr]={checked:false,notes:'',feeling:'None'};
-      }
-      const logs=habit.logs[dateStr];
-      const modal=document.getElementById('detailsModalContent');
-      const feelings=['Great','Good','Meh','Bad','None'];
-      let feelingOptions='';
-      feelings.forEach(f=>{
-        const sel=logs.feeling===f?'selected':'';
-        feelingOptions+=`<option value="${f}" ${sel}>${f}</option>`;
-      });
-      modal.innerHTML=`
-        <div class="modal-header">
-          <h5 class="modal-title">Details for ${habit.title} on ${dateStr}</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-feeling feeling-${logs.feeling}" id="detailsModalBody">
-          <div class="mb-3">
-            <label class="form-label"><strong>Notes:</strong></label>
-            <textarea class="form-control" rows="3" id="modalNotes">${logs.notes||''}</textarea>
-          </div>
-          <div>
-            <label class="form-label"><strong>Feeling:</strong></label>
-            <select class="form-select" id="modalFeeling">${feelingOptions}</select>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button
-            type="button"
-            class="btn btn-primary"
-            id="saveDetailsBtn"
-            data-bs-dismiss="modal"
-          >
-            Save
-          </button>
-        </div>
-      `;
-      const feelSel=document.getElementById('modalFeeling');
-      feelSel.addEventListener('change',(e)=>{
-        const val=e.target.value||'None';
-        const body=document.getElementById('detailsModalBody');
-        body.className=`modal-feeling feeling-${val}`;
-      });
-      document.getElementById('saveDetailsBtn').addEventListener('click',()=>{
-        const n=document.getElementById('modalNotes').value;
-        const f=document.getElementById('modalFeeling').value;
-        // If user saves details => set heart to true
-        habit.logs[dateStr].checked=true;
-        habit.logs[dateStr].notes=n;
-        habit.logs[dateStr].feeling=f; // Corrected variable name
-        saveData();
-        // Update the heart button directly
-        updateHeartButton(pIndex, hIndex, dateStr);
-        // No need to re-render the entire page
-      });
-    }
+    /**
+     * Renders the Analytics page with different views.
+     */
+    function renderAnalyticsPage() {
+      const app = document.getElementById('app');
 
-    // Update Heart Button UI
-    function updateHeartButton(pIndex, hIndex, dateStr){
-      const selector = `.heart-btn[data-partner-index="${pIndex}"][data-habit-index="${hIndex}"][data-datestr="${dateStr}"]`;
-      const heartBtn = document.querySelector(selector);
-      if(heartBtn){
-        if(dataStore.partners[pIndex].habits[hIndex].logs[dateStr].checked){
-          heartBtn.classList.remove('empty');
-          heartBtn.classList.add('filled');
-          heartBtn.textContent = '♥';
-        } else {
-          heartBtn.classList.remove('filled');
-          heartBtn.classList.add('empty');
-          heartBtn.textContent = '♡';
-        }
-      }
-    }
-
-    // Render Analytics Page
-    function renderAnalyticsPage(){
-      const app=document.getElementById('app');
-      if(!dataStore.partners.length){
-        app.innerHTML=`
+      if (!dataStore.partners.length) {
+        app.innerHTML = `
           <div class="text-center mt-5">
             <h3>Analytics</h3>
             <p class="text-muted">No partners yet. <a href="#/settings">Add them</a>.</p>
@@ -914,8 +1228,9 @@
         `;
         return;
       }
-      if(selectedPartners.length === 0){
-        app.innerHTML=`
+
+      if (selectedPartners.length === 0) {
+        app.innerHTML = `
           <div class="text-center mt-5">
             <h4>No Partners Selected</h4>
             <p class="text-muted">Please select at least one partner from the dropdown above.</p>
@@ -923,77 +1238,74 @@
         `;
         return;
       }
-      let html=`
+
+      let html = `
         <h2 class="mb-3">Analytics</h2>
         <div class="d-flex justify-content-center gap-2 mb-3 flex-wrap">
-          <button class="btn btn-outline-dark btn-sm" id="btnWeekly">Weekly</button>
-          <button class="btn btn-outline-dark btn-sm" id="btnMonthly">Monthly</button>
+          <button class="btn btn-outline-dark btn-sm" id="btnWeekly">Weekly Progress</button>
+          <button class="btn btn-outline-dark btn-sm" id="btnMonthly">Monthly Progress</button>
+          <button class="btn btn-outline-dark btn-sm" id="btnYearly">Yearly Progress</button>
         </div>
       `;
-      if(analyticsView==='weekly'){
-        html+=renderWeeklyTrends();
-      }else{
-        html+=renderMonthlyTrends();
+
+      if (analyticsView === 'weekly') {
+        html += renderWeeklyAnalytics();
+      } else if (analyticsView === 'monthly') {
+        html += renderMonthlyAnalytics();
+      } else if (analyticsView === 'yearly') {
+        html += renderYearlyAnalytics();
       }
-      app.innerHTML=html;
+
+      app.innerHTML = html;
       attachAnalyticsEvents();
     }
-    function attachAnalyticsEvents(){
-      document.getElementById('btnWeekly')?.addEventListener('click',()=>{
-        analyticsView='weekly';
+
+    /**
+     * Attaches event listeners to Analytics view buttons.
+     */
+    function attachAnalyticsEvents() {
+      document.getElementById('btnWeekly')?.addEventListener('click', () => {
+        analyticsView = 'weekly';
         renderAnalyticsPage();
       });
-      document.getElementById('btnMonthly')?.addEventListener('click',()=>{
-        analyticsView='monthly';
+      document.getElementById('btnMonthly')?.addEventListener('click', () => {
+        analyticsView = 'monthly';
+        renderAnalyticsPage();
+      });
+      document.getElementById('btnYearly')?.addEventListener('click', () => {
+        analyticsView = 'yearly';
         renderAnalyticsPage();
       });
     }
-    function renderWeeklyTrends(){
-      let html='';
-      selectedPartners.forEach(pIndex=>{
+
+    /**
+     * Renders the Weekly Analytics view.
+     * @returns {string}
+     */
+    function renderWeeklyAnalytics() {
+      let html = '';
+      selectedPartners.forEach(pIndex => {
         const partner = dataStore.partners[pIndex];
-        if(!partner.habits||!partner.habits.length)return;
-        html+=`<h4 class="mb-2">${partner.name} (Weekly)</h4>`;
-        partner.habits.forEach(habit=>{
-          if(habit.frequency !== 'weekly') return; // Only include weekly habits
-          const weeklyGoal=habit.goal>0?habit.goal:7;
-          const stat=overallCompletion(habit.logs);
-          const ratio=`${stat}/${weeklyGoal}`;
-          const pct=Math.round((stat/weeklyGoal)*100);
-          const color=stat>=weeklyGoal?'bg-success':'bg-warning';
-          html+=`
+        const weeklyHabits = partner.habits.filter(habit => habit.frequency === 'weekly');
+        if (weeklyHabits.length === 0) return;
+
+        html += `<h4 class="mb-2">${partner.name} (Weekly Habits)</h4>`;
+        weeklyHabits.forEach(habit => {
+          const totalDaysAchieved = getDaysAchieved(habit, getMondayWeekDates(weekOffset));
+          const weeklyGoal = habit.goal > 0 ? habit.goal : 7;
+          const percentage = Math.round((totalDaysAchieved / weeklyGoal) * 100);
+          const progressColor = totalDaysAchieved >= weeklyGoal ? 'bg-success' : 'bg-warning';
+          const streak = computeWeeklyStreak(habit);
+
+          html += `
             <div class="mb-3">
-              <strong>${habit.title}</strong> (Goal: ${weeklyGoal})
+              <strong>${habit.title}</strong> (Goal: ${weeklyGoal} days)
               <div class="progress mt-1">
-                <div class="progress-bar ${color}" role="progressbar" style="width: ${pct > 100 ? 100 : pct}%;" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
+                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percentage > 100 ? 100 : percentage}%;" aria-valuenow="${percentage}" aria-valuemin="0" aria-valuemax="100"></div>
               </div>
-              <small class="text-muted">${ratio} = ${pct}%</small>
-            </div>
-          `;
-        });
-      });
-      return html;
-    }
-    function renderMonthlyTrends(){
-      let html='';
-      selectedPartners.forEach(pIndex=>{
-        const partner = dataStore.partners[pIndex];
-        if(!partner.habits||!partner.habits.length)return;
-        html+=`<h4 class="mb-2">${partner.name} (Monthly)</h4>`;
-        partner.habits.forEach(habit=>{
-          if(habit.frequency !== 'yearly') return; // Only include yearly habits
-          const yearlyGoal = habit.goal >0 ? habit.goal :1;
-          const comp=monthlyCompletion(habit.logs);
-          const ratio=`${comp}/${yearlyGoal}`;
-          const pct=Math.round((comp/yearlyGoal)*100);
-          const color=comp>=yearlyGoal?'bg-success':'bg-info';
-          html+=`
-            <div class="mb-3">
-              <strong>${habit.title}</strong> (Yearly Goal: ${yearlyGoal})
-              <div class="progress mt-1">
-                <div class="progress-bar ${color}" role="progressbar" style="width: ${pct > 100 ? 100 : pct}%;" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
-              </div>
-              <small class="text-muted">${ratio} = ${pct}%</small>
+              <small class="text-muted">Days Achieved: ${totalDaysAchieved}/${weeklyGoal} (${percentage}%)</small>
+              <br>
+              <small class="text-success streak">🔥 Streak: ${streak} week(s)</small>
             </div>
           `;
         });
@@ -1001,32 +1313,85 @@
       return html;
     }
 
-    // Compute Overall Completion for Analytics
-    function overallCompletion(logs){
-      let c=0;
-      Object.keys(logs).forEach(d=>{
-        if(logs[d].checked)c++;
+    /**
+     * Renders the Monthly Analytics view by aggregating the last 4 weeks.
+     * @returns {string}
+     */
+    function renderMonthlyAnalytics() {
+      let html = '';
+      selectedPartners.forEach(pIndex => {
+        const partner = dataStore.partners[pIndex];
+        const weeklyHabits = partner.habits.filter(habit => habit.frequency === 'weekly');
+        if (weeklyHabits.length === 0) return;
+
+        html += `<h4 class="mb-2">${partner.name} (Monthly Habits)</h4>`;
+        weeklyHabits.forEach(habit => {
+          // Get the last 4 weeks including current
+          const last4Weeks = [weekOffset, weekOffset - 1, weekOffset - 2, weekOffset - 3];
+          let totalDaysAchieved = 0;
+          last4Weeks.forEach(wo => {
+            const weekDates = getMondayWeekDates(wo);
+            totalDaysAchieved += getDaysAchieved(habit, weekDates);
+          });
+          const monthlyGoal = (habit.goal > 0 ? habit.goal : 7) * 4;
+          const percentage = Math.round((totalDaysAchieved / monthlyGoal) * 100);
+          const progressColor = totalDaysAchieved >= (monthlyGoal * 0.75) ? 'bg-success' : 'bg-info';
+
+          html += `
+            <div class="mb-3">
+              <strong>${habit.title}</strong> (Goal: ${(habit.goal > 0 ? habit.goal : 7)} × 4 weeks = ${monthlyGoal} days)
+              <div class="progress mt-1">
+                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percentage > 100 ? 100 : percentage}%;" aria-valuenow="${percentage}" aria-valuemin="0" aria-valuemax="100"></div>
+              </div>
+              <small class="text-muted">Days Achieved: ${totalDaysAchieved}/${monthlyGoal} (${percentage}%)</small>
+            </div>
+          `;
+        });
       });
-      return c;
-    }
-    function monthlyCompletion(logs){
-      const now=new Date();
-      const y=now.getFullYear();
-      const m=now.getMonth();
-      let c=0;
-      Object.keys(logs).forEach(d=>{
-        const parts=d.split('-');
-        const yy=parseInt(parts[0],10);
-        const mm=parseInt(parts[1],10)-1;
-        if(yy===y&&mm===m&&logs[d].checked)c++;
-      });
-      return c;
+      return html;
     }
 
-    // Render Settings Page
-    function renderSettingsPage(){
+    /**
+     * Renders the Yearly Analytics view.
+     * @returns {string}
+     */
+    function renderYearlyAnalytics() {
+      let html = '';
+      selectedPartners.forEach(pIndex => {
+        const partner = dataStore.partners[pIndex];
+        const yearlyHabits = partner.habits.filter(habit => habit.frequency === 'yearly');
+        if (yearlyHabits.length === 0) return;
+
+        html += `<h4 class="mb-2">${partner.name} (Yearly Habits)</h4>`;
+        yearlyHabits.forEach(habit => {
+          const currentYear = new Date().getFullYear();
+          const daysAchieved = getDaysAchievedInYear(habit, currentYear);
+          const yearlyGoal = habit.goal > 0 ? habit.goal : 1;
+          const percentage = Math.round((daysAchieved / yearlyGoal) * 100);
+          const progressColor = daysAchieved >= yearlyGoal ? 'bg-success' : 'bg-info';
+
+          html += `
+            <div class="mb-3">
+              <strong>${habit.title}</strong> (Yearly Goal: ${yearlyGoal} days)
+              <div class="progress mt-1">
+                <div class="progress-bar ${progressColor}" role="progressbar" style="width: ${percentage > 100 ? 100 : percentage}%;" aria-valuenow="${percentage}" aria-valuemin="0" aria-valuemax="100"></div>
+              </div>
+              <small class="text-muted">Days Achieved: ${daysAchieved}/${yearlyGoal} (${percentage}%)</small>
+            </div>
+          `;
+        });
+      });
+      return html;
+    }
+
+    // ================== Settings Rendering ==================
+
+    /**
+     * Renders the Settings page with options to configure Firestore, manage partners and habits, and delete all data.
+     */
+    function renderSettingsPage() {
       const app = document.getElementById('app');
-      let html=`
+      let html = `
         <h2 class="mb-4">Settings</h2>
         <!-- Firestore Configuration Section -->
         <div class="mb-4">
@@ -1067,7 +1432,7 @@
                           <li class="list-group-item d-flex justify-content-between align-items-center">
                             <div>
                               <strong>${habit.title}</strong> 
-                              <small class="text-muted">(${habit.frequency.charAt(0).toUpperCase() + habit.frequency.slice(1)} Goal: ${habit.frequency === 'weekly' ? (habit.goal >0 ? habit.goal :7) : (habit.goal >0 ? habit.goal :1)})</small>
+                              <small class="text-muted">(${capitalizeFirstLetter(habit.frequency)} Goal: ${habit.frequency === 'weekly' ? (habit.goal > 0 ? habit.goal : 7) : (habit.goal > 0 ? habit.goal : 1)})</small>
                             </div>
                             <div>
                               <button class="btn btn-sm btn-secondary me-2 edit-habit-btn" data-partner-index="${pIndex}" data-habit-index="${hIndex}" data-bs-toggle="modal" data-bs-target="#editHabitModal">Edit</button>
@@ -1083,7 +1448,7 @@
             `).join('')}
           </div>
         `}
-        
+
         <!-- Firestore Configuration Modal -->
         <div class="modal fade" id="firestoreConfigModal" tabindex="-1" aria-labelledby="firestoreConfigModalLabel" aria-hidden="true">
           <div class="modal-dialog modal-lg">
@@ -1260,421 +1625,96 @@
         </div>
       `;
 
-      app.innerHTML=html;
+      app.innerHTML = html;
       attachSettingsEvents();
     }
 
-    // Attach Events for Settings Page
-    function attachSettingsEvents(){
-      // Firestore Configuration Form Submission
-      document.getElementById('firestoreConfigForm')?.addEventListener('submit', (e)=>{
-        e.preventDefault();
-        const apiKey = document.getElementById('firebaseApiKey').value.trim();
-        const authDomain = document.getElementById('firebaseAuthDomain').value.trim();
-        const projectId = document.getElementById('firebaseProjectId').value.trim();
+    // ================== Analytics Functions ==================
 
-        if(!apiKey || !authDomain || !projectId){
-          alert('Please fill in all Firestore configuration fields.');
-          return;
-        }
+    /**
+     * Computes the total days achieved for a habit within a given set of dates.
+     * @param {object} habit 
+     * @param {Array} dates - Array of date objects with dateStr and label.
+     * @returns {number}
+     */
+    function getDaysAchieved(habit, dates) {
+      return dates.reduce((acc, day) => {
+        if (habit.logs[day.dateStr]?.checked) acc += 1;
+        return acc;
+      }, 0);
+    }
 
-        const config = {
-          apiKey,
-          authDomain,
-          projectId
-        };
+    /**
+     * Computes the total days achieved for a yearly habit.
+     * @param {object} habit 
+     * @param {number} year 
+     * @returns {number}
+     */
+    function getDaysAchievedInYear(habit, year) {
+      return Object.keys(habit.logs).reduce((acc, dateStr) => {
+        const date = new Date(dateStr);
+        if (date.getFullYear() === year && habit.logs[dateStr].checked) acc += 1;
+        return acc;
+      }, 0);
+    }
 
-        // Save configuration to localStorage
-        localStorage.setItem(FIRESTORE_CONFIG_STORAGE_KEY, JSON.stringify(config));
-        firestoreSettings = config;
+    /**
+     * Computes the goal progress for a habit based on its frequency.
+     * @param {object} habit 
+     * @param {Array} days 
+     * @returns {object} - { count, percent }
+     */
+    function computeGoalProgress(habit, days) {
+      let count = 0;
+      if (habit.frequency === 'weekly') {
+        count = getDaysAchieved(habit, days);
+        const weeklyGoal = habit.goal > 0 ? habit.goal : 7;
+        const percent = Math.round((count / weeklyGoal) * 100);
+        return { count, percent };
+      } else if (habit.frequency === 'yearly') {
+        const currentYear = new Date().getFullYear();
+        count = getDaysAchievedInYear(habit, currentYear);
+        const yearlyGoal = habit.goal > 0 ? habit.goal : 1;
+        const percent = Math.round((count / yearlyGoal) * 100);
+        return { count, percent };
+      }
+      return { count: 0, percent: 0 };
+    }
 
-        // Initialize Firestore
-        initFirestore(config);
-
-        alert('Firestore configuration saved and connected.');
-
-        // Hide the modal properly to remove the backdrop
-        const modalElement = document.getElementById('firestoreConfigModal');
-        const modal = bootstrap.Modal.getInstance(modalElement);
-        if (modal) {
-          modal.hide();
-        }
-      });
-
-      // Pre-populate Firestore Configuration Modal if settings exist
-      const firestoreConfigModal = document.getElementById('firestoreConfigModal');
-      firestoreConfigModal.addEventListener('show.bs.modal', () => {
-        if (firestoreSettings) {
-          document.getElementById('firebaseApiKey').value = firestoreSettings.apiKey || '';
-          document.getElementById('firebaseAuthDomain').value = firestoreSettings.authDomain || '';
-          document.getElementById('firebaseProjectId').value = firestoreSettings.projectId || '';
-        } else {
-          document.getElementById('firebaseApiKey').value = '';
-          document.getElementById('firebaseAuthDomain').value = '';
-          document.getElementById('firebaseProjectId').value = '';
-        }
-      });
-
-      // Add Partner Form Submission
-      document.getElementById('addPartnerForm')?.addEventListener('submit', (e)=>{
-        e.preventDefault();
-        const nameInput = document.getElementById('partnerName');
-        const name = nameInput.value.trim();
-        if(name === ''){
-          alert('Partner name cannot be empty.');
-          return;
-        }
-        // Check for duplicate partner name
-        const duplicate = dataStore.partners.some(p => p.name.toLowerCase() === name.toLowerCase());
-        if(duplicate){
-          alert('A partner with this name already exists.');
-          return;
-        }
-        // Add new partner
-        dataStore.partners.push({ name, habits: [] });
-        saveData();
-        // Reset and close modal
-        nameInput.value = '';
-        // Update selected partners (select the new partner by default)
-        selectedPartners.push(dataStore.partners.length -1);
-        saveSelectedPartners();
-        // Re-initialize dropdown
-        initPartnersDropdown();
-        // Hide the modal properly
-        const addPartnerModal = bootstrap.Modal.getInstance(document.getElementById('addPartnerModal'));
-        if (addPartnerModal) {
-          addPartnerModal.hide();
-        }
-      });
-
-      // Edit Partner Form Submission
-      document.getElementById('editPartnerForm')?.addEventListener('submit', (e)=>{
-        e.preventDefault();
-        const pIndex = parseInt(document.getElementById('editPartnerIndex').value);
-        const name = document.getElementById('editPartnerName').value.trim();
-        if(name === ''){
-          alert('Partner name cannot be empty.');
-          return;
-        }
-        // Check for duplicate partner name excluding current
-        const duplicate = dataStore.partners.some((p, index) => p.name.toLowerCase() === name.toLowerCase() && index !== pIndex);
-        if(duplicate){
-          alert('Another partner with this name already exists.');
-          return;
-        }
-        // Update partner name
-        dataStore.partners[pIndex].name = name;
-        saveData();
-        // Re-initialize dropdown
-        initPartnersDropdown();
-        // Hide the modal properly
-        const editPartnerModal = bootstrap.Modal.getInstance(document.getElementById('editPartnerModal'));
-        if (editPartnerModal) {
-          editPartnerModal.hide();
-        }
-      });
-
-      // Add Habit Form Submission
-      document.getElementById('addHabitForm')?.addEventListener('submit', (e)=>{
-        e.preventDefault();
-        const pIndex = parseInt(document.getElementById('addHabitPartnerIndex').value);
-        const title = document.getElementById('habitTitle').value.trim();
-        const frequency = document.getElementById('habitFrequency').value;
-        const goal = parseInt(document.getElementById('habitGoal').value);
-        if(title === '' || isNaN(goal) || goal < 1){
-          alert('Please provide a valid habit title and goal.');
-          return;
-        }
-        // Check for duplicate habit title under the same partner
-        const duplicate = dataStore.partners[pIndex].habits.some(h => h.title.toLowerCase() === title.toLowerCase());
-        if(duplicate){
-          alert('A habit with this title already exists for this partner.');
-          return;
-        }
-        // Add new habit
-        dataStore.partners[pIndex].habits.push({ title, frequency, goal, logs: {} });
-        saveData();
-        // Reset and close modal
-        document.getElementById('habitTitle').value = '';
-        document.getElementById('habitFrequency').value = 'weekly';
-        document.getElementById('habitGoal').value = '';
-        // Hide the modal properly
-        const addHabitModal = bootstrap.Modal.getInstance(document.getElementById('addHabitModal'));
-        if (addHabitModal) {
-          addHabitModal.hide();
-        }
-      });
-
-      // Edit Habit Form Submission
-      document.getElementById('editHabitForm')?.addEventListener('submit', (e)=>{
-        e.preventDefault();
-        const pIndex = parseInt(document.getElementById('editHabitPartnerIndex').value);
-        const hIndex = parseInt(document.getElementById('editHabitIndex').value);
-        const title = document.getElementById('editHabitTitle').value.trim();
-        const frequency = document.getElementById('editHabitFrequency').value;
-        const goal = parseInt(document.getElementById('editHabitGoal').value);
-        if(title === '' || isNaN(goal) || goal < 1){
-          alert('Please provide a valid habit title and goal.');
-          return;
-        }
-        // Check for duplicate habit title under the same partner excluding current
-        const duplicate = dataStore.partners[pIndex].habits.some((h, index) => h.title.toLowerCase() === title.toLowerCase() && index !== hIndex);
-        if(duplicate){
-          alert('Another habit with this title already exists for this partner.');
-          return;
-        }
-        // Update habit
-        dataStore.partners[pIndex].habits[hIndex].title = title;
-        dataStore.partners[pIndex].habits[hIndex].frequency = frequency;
-        dataStore.partners[pIndex].habits[hIndex].goal = goal;
-        saveData();
-        // Re-initialize dropdown
-        initPartnersDropdown();
-        // Hide the modal properly
-        const editHabitModal = bootstrap.Modal.getInstance(document.getElementById('editHabitModal'));
-        if (editHabitModal) {
-          editHabitModal.hide();
-        }
-      });
-
-      // Remove Partner
-      document.querySelectorAll('.remove-partner-btn').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
-          const confirmDelete = confirm(`Are you sure you want to remove partner "${dataStore.partners[pIndex].name}"? This will also remove all their habits.`);
-          if(confirmDelete){
-            dataStore.partners.splice(pIndex, 1);
-            saveData();
-            // Remove from selectedPartners if present
-            selectedPartners = selectedPartners.filter(index => index !== pIndex);
-            // Update indices in selectedPartners that are greater than pIndex
-            selectedPartners = selectedPartners.map(index => index > pIndex ? index -1 : index);
-            saveSelectedPartners();
-            // Re-initialize dropdown
-            initPartnersDropdown();
-            // Re-render settings page
-            renderSettingsPage();
-            // Re-render home and analytics
-            renderHomePage();
-            renderAnalyticsPage();
+    /**
+     * Computes the weekly streak for a habit.
+     * @param {object} habit 
+     * @returns {number}
+     */
+    function computeWeeklyStreak(habit){
+      if(habit.frequency !== 'weekly') return 0; // Only compute streak for weekly habits
+      const now = new Date();
+      let streak = 0;
+      let weekOffset = 0; // Current week
+      while(true){
+        const weekDates = getMondayWeekDates(weekOffset);
+        const count = weekDates.reduce((acc, day) => {
+          if(habit.logs[day.dateStr] && habit.logs[day.dateStr].checked){
+            return acc +1;
           }
-        });
-      });
-
-      // Edit Partner Button Click
-      document.querySelectorAll('.edit-partner-btn').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
-          document.getElementById('editPartnerIndex').value = pIndex;
-          document.getElementById('editPartnerName').value = dataStore.partners[pIndex].name;
-        });
-      });
-
-      // Remove Habit
-      document.querySelectorAll('.remove-habit-btn').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
-          const hIndex = parseInt(e.target.getAttribute('data-habit-index'));
-          const confirmDelete = confirm(`Are you sure you want to remove habit "${dataStore.partners[pIndex].habits[hIndex].title}"?`);
-          if(confirmDelete){
-            dataStore.partners[pIndex].habits.splice(hIndex, 1);
-            saveData();
-            // Re-render settings page
-            renderSettingsPage();
-            // Re-initialize dropdown
-            initPartnersDropdown();
-            // Re-render home and analytics
-            renderHomePage();
-            renderAnalyticsPage();
+          return acc;
+        }, 0);
+        const weeklyGoal = habit.goal >0 ? habit.goal : 7;
+        if(count >= weeklyGoal){
+          streak++;
+          weekOffset--;
+        } else if (count<weeklyGoal && weekOffset==0){
+          weekOffset--;
           }
-        });
-      });
-
-      // Edit Habit Button Click
-      document.querySelectorAll('.edit-habit-btn').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
-          const hIndex = parseInt(e.target.getAttribute('data-habit-index'));
-          document.getElementById('editHabitPartnerIndex').value = pIndex;
-          document.getElementById('editHabitIndex').value = hIndex;
-          document.getElementById('editHabitTitle').value = dataStore.partners[pIndex].habits[hIndex].title;
-          document.getElementById('editHabitFrequency').value = dataStore.partners[pIndex].habits[hIndex].frequency;
-          document.getElementById('editHabitGoal').value = dataStore.partners[pIndex].habits[hIndex].goal;
-        });
-      });
-
-      // Add Habit Button Click - Set the partner index in the modal
-      document.querySelectorAll('.add-habit-btn').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const pIndex = parseInt(e.target.getAttribute('data-partner-index'));
-          document.getElementById('addHabitPartnerIndex').value = pIndex;
-          // Reset the form fields
-          document.getElementById('habitTitle').value = '';
-          document.getElementById('habitFrequency').value = 'weekly';
-          document.getElementById('habitGoal').value = '';
-        });
-      });
-
-      // Delete All Data Button Click
-      document.getElementById('deleteAllDataBtn')?.addEventListener('click', ()=>{
-        const deleteAllDataModal = new bootstrap.Modal(document.getElementById('deleteAllDataModal'));
-        deleteAllDataModal.show();
-      });
-
-      // Confirm Delete All Data
-      document.getElementById('confirmDeleteAllDataBtn')?.addEventListener('click', ()=>{
-        // Clear localStorage
-        localStorage.removeItem(STORAGE_KEY);
-        localStorage.removeItem(FIRESTORE_CONFIG_STORAGE_KEY);
-        localStorage.removeItem(SELECTED_PARTNERS_KEY);
-        dataStore = { partners: [] };
-        selectedPartners = [];
-        // Delete Firestore data
-        if(firestore){
-          firestore.collection('habitTrackers').doc('default').delete()
-            .then(() => {
-              console.log('All Firestore data deleted.');
-            })
-            .catch(err => {
-              console.error('Error deleting Firestore data:', err);
-              alert(`Error deleting Firestore data: ${err.message}`);
-            });
+        else {
+          break;
         }
-        // Re-initialize
-        initPartnersDropdown();
-        // Re-render settings, home, and analytics pages
-        renderSettingsPage();
-        renderHomePage();
-        renderAnalyticsPage();
-        // Hide the modal
-        const deleteAllDataModal = bootstrap.Modal.getInstance(document.getElementById('deleteAllDataModal'));
-        if (deleteAllDataModal) {
-          deleteAllDataModal.hide();
-        }
-      });
+      }
+      return streak;
     }
 
-    // Render Analytics Page
-    function renderAnalyticsPage(){
-      const app=document.getElementById('app');
-      if(!dataStore.partners.length){
-        app.innerHTML=`
-          <div class="text-center mt-5">
-            <h3>Analytics</h3>
-            <p class="text-muted">No partners yet. <a href="#/settings">Add them</a>.</p>
-          </div>
-        `;
-        return;
-      }
-      if(selectedPartners.length === 0){
-        app.innerHTML=`
-          <div class="text-center mt-5">
-            <h4>No Partners Selected</h4>
-            <p class="text-muted">Please select at least one partner from the dropdown above.</p>
-          </div>
-        `;
-        return;
-      }
-      let html=`
-        <h2 class="mb-3">Analytics</h2>
-        <div class="d-flex justify-content-center gap-2 mb-3 flex-wrap">
-          <button class="btn btn-outline-dark btn-sm" id="btnWeekly">Weekly</button>
-          <button class="btn btn-outline-dark btn-sm" id="btnMonthly">Monthly</button>
-        </div>
-      `;
-      if(analyticsView==='weekly'){
-        html+=renderWeeklyTrends();
-      }else{
-        html+=renderMonthlyTrends();
-      }
-      app.innerHTML=html;
-      attachAnalyticsEvents();
-    }
-    function attachAnalyticsEvents(){
-      document.getElementById('btnWeekly')?.addEventListener('click',()=>{
-        analyticsView='weekly';
-        renderAnalyticsPage();
-      });
-      document.getElementById('btnMonthly')?.addEventListener('click',()=>{
-        analyticsView='monthly';
-        renderAnalyticsPage();
-      });
-    }
-    function renderWeeklyTrends(){
-      let html='';
-      selectedPartners.forEach(pIndex=>{
-        const partner = dataStore.partners[pIndex];
-        if(!partner.habits||!partner.habits.length)return;
-        html+=`<h4 class="mb-2">${partner.name} (Weekly)</h4>`;
-        partner.habits.forEach(habit=>{
-          if(habit.frequency !== 'weekly') return; // Only include weekly habits
-          const weeklyGoal=habit.goal>0?habit.goal:7;
-          const stat=overallCompletion(habit.logs);
-          const ratio=`${stat}/${weeklyGoal}`;
-          const pct=Math.round((stat/weeklyGoal)*100);
-          const color=stat>=weeklyGoal?'bg-success':'bg-warning';
-          html+=`
-            <div class="mb-3">
-              <strong>${habit.title}</strong> (Goal: ${weeklyGoal})
-              <div class="progress mt-1">
-                <div class="progress-bar ${color}" role="progressbar" style="width: ${pct > 100 ? 100 : pct}%;" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
-              </div>
-              <small class="text-muted">${ratio} = ${pct}%</small>
-            </div>
-          `;
-        });
-      });
-      return html;
-    }
-    function renderMonthlyTrends(){
-      let html='';
-      selectedPartners.forEach(pIndex=>{
-        const partner = dataStore.partners[pIndex];
-        if(!partner.habits||!partner.habits.length)return;
-        html+=`<h4 class="mb-2">${partner.name} (Monthly)</h4>`;
-        partner.habits.forEach(habit=>{
-          if(habit.frequency !== 'yearly') return; // Only include yearly habits
-          const yearlyGoal = habit.goal >0 ? habit.goal :1;
-          const comp=monthlyCompletion(habit.logs);
-          const ratio=`${comp}/${yearlyGoal}`;
-          const pct=Math.round((comp/yearlyGoal)*100);
-          const color=comp>=yearlyGoal?'bg-success':'bg-info';
-          html+=`
-            <div class="mb-3">
-              <strong>${habit.title}</strong> (Yearly Goal: ${yearlyGoal})
-              <div class="progress mt-1">
-                <div class="progress-bar ${color}" role="progressbar" style="width: ${pct > 100 ? 100 : pct}%;" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"></div>
-              </div>
-              <small class="text-muted">${ratio} = ${pct}%</small>
-            </div>
-          `;
-        });
-      });
-      return html;
-    }
-
-    // Compute Overall Completion for Analytics
-    function overallCompletion(logs){
-      let c=0;
-      Object.keys(logs).forEach(d=>{
-        if(logs[d].checked)c++;
-      });
-      return c;
-    }
-    function monthlyCompletion(logs){
-      const now=new Date();
-      const y=now.getFullYear();
-      const m=now.getMonth();
-      let c=0;
-      Object.keys(logs).forEach(d=>{
-        const parts=d.split('-');
-        const yy=parseInt(parts[0],10);
-        const mm=parseInt(parts[1],10)-1;
-        if(yy===y&&mm===m&&logs[d].checked)c++;
-      });
-      return c;
-    }
-
+    // ================== Start the Application ==================
+    // Routing and initial rendering are handled in the window load event listener.
   </script>
 </body>
 </html>
